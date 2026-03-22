@@ -1,63 +1,77 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-import networkx as nx
 import numpy as np
+import networkx as nx
+from pydantic import BaseModel
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="DebtRank API - Risco Sistêmico B2B")
+# 1. Inicialização da API
+app = FastAPI(title="DebtRank API")
 
-# --- 1. CONSTRUINDO A ESTRUTURA DE DADOS (O GRAFO) ---
-# Usamos um grafo direcionado (DiGraph) porque a dívida tem uma direção (A deve para B)
+# Libera a segurança do CORS para o Hackathon
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # Permite que qualquer front-end converse com a API
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ... (o resto do seu código continua exatamente igual daqui para baixo)
+
+# 2. Construção da Estrutura de Dados (O Grafo)
 G = nx.DiGraph()
 
-# Adicionando as empresas (Nós)
-empresas = ["Varejista", "Distribuidora", "Fabrica", "Logistica"]
-G.add_nodes_from(empresas)
+companies = ["padaria", "servicos", "agro", "logistica"]
+G.add_nodes_from(companies)
 
-# Adicionando as vulnerabilidades financeiras (Arestas)
-# A semântica aqui é: (De quem o choque vem, Para quem o choque vai, peso da vulnerabilidade)
-G.add_edge("Varejista", "Distribuidora", weight=1)
-G.add_edge("Varejista", "Logistica", weight=0.15)
-G.add_edge("Distribuidora", "Fabrica", weight=0.60)
+# (Origem da dívida, Destino do dinheiro, Porcentagem de impacto)
+G.add_edge("padaria", "servicos", weight=0.15)
+G.add_edge("agro", "padaria", weight=0.5)
+G.add_edge("servicos", "agro", weight=0.1)
+G.add_edge("logistica", "agro", weight=0.4)
+G.add_edge("agro", "logistica", weight=0.1)
+G.add_edge("logistica", "servicos", weight=0.2)
 
-# --- 2. PREPARANDO A MATRIZ (ÁLGEBRA LINEAR) ---
-# Extraímos a matriz de adjacência pronta para o motor matemático
-matriz_vulnerabilidade = nx.to_numpy_array(G, nodelist=empresas)
+# Transforma o grafo em uma matriz de adjacencia ponderada (vulnerabilidades)
+vulnerabilities_matrix = nx.to_numpy_array(G, nodelist=companies)
 
+# Define o modelo de requisiçao para o endpoint
+class DebtRankRequest(BaseModel):
+    company_name: str
+    intensity: float
 
-# --- 3. CRIANDO A ROTA DA API ---
-class ChoqueRequest(BaseModel):
-    nome_empresa: str
-    intensidade: float # De 0.0 a 1.0
+# 5. O Endpoint (A Rota que processa o cálculo)
+@app.post("/debt_rank")
+def calculate_debt_rank(dados: DebtRankRequest):
+    print(f"--> [BACKEND] Recebi o pacote da empresa: {dados.company_name}")
 
-@app.post("/simular-choque")
-def simular_choque(dados: ChoqueRequest):
-    # Validando se a empresa existe na rede
-    if dados.nome_empresa not in empresas:
-        return {"erro": "Empresa não encontrada na rede."}
+    if dados.company_name not in companies:
+        return {"error": "Company not found in the graph."}
 
-    # Criando o vetor de estresse inicial (tudo zero)
-    vetor_estresse = np.zeros(len(empresas))
-    
-    # Injetando o choque inicial na empresa correta
-    indice_empresa = empresas.index(dados.nome_empresa)
-    vetor_estresse[indice_empresa] = dados.intensidade
+    estresse_atual = np.zeros(len(companies))
+    indices_empresa = companies.index(dados.company_name)
+    estresse_atual[indices_empresa] = dados.intensity
 
-    # --- O MOTOR DO DEBTRANK (A Multiplicação) ---
-    # Aqui fazemos 1 iteração de propagação (o choque passando para os vizinhos)
-    # matriz_vulnerabilidade.T é a matriz transposta
-    estresse_propagado = matriz_vulnerabilidade.T @ vetor_estresse
-    
-    # O estresse total no sistema agora é o inicial + o que vazou
-    estresse_total = vetor_estresse + estresse_propagado
-    score_debtrank = np.sum(estresse_total)
+    estresse_total_acumulado = np.copy(estresse_atual)
+    onda_de_choque = np.copy(estresse_atual)
 
-    # Montando a resposta amigável para o Front-end
+    iteracoes = 0
+    # TRAVA DE SEGURANÇA: Só roda enquanto for > 0.0001 e NO MÁXIMO 100 vezes.
+    while np.sum(onda_de_choque) > 0.0001 and iteracoes < 100:
+        iteracoes += 1
+        onda_de_choque = vulnerabilities_matrix.T @ onda_de_choque
+        estresse_total_acumulado += onda_de_choque
+        print(f"    Iteração {iteracoes}: Força da onda = {np.sum(onda_de_choque)}")
+
+    score_debtrank = np.sum(estresse_total_acumulado)
+    print(f"<-- [BACKEND] Cálculo finalizado na iteração {iteracoes}! Score: {score_debtrank}")
+
     resultado = {
-        "empresa_origem": dados.nome_empresa,
-        "choque_inicial": dados.intensidade,
+        "empresa_origem": dados.company_name,
+        "choque_inicial": dados.intensity,
         "risco_sistemico_total": round(score_debtrank, 4),
         "impacto_nas_empresas": {
-            empresas[i]: round(estresse_total[i], 4) for i in range(len(empresas))
+            companies[i]: round(estresse_total_acumulado[i], 4) for i in range(len(companies))
         }
     }
     
